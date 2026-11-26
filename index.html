@@ -87,62 +87,49 @@ const barcodeKey=v=>norm(v).toUpperCase();
 const normalizeScan=s=>({...s,loc:barcodeKey(s.loc),barcode:barcodeKey(s.barcode)});
 const num=v=>{let n=Number(String(v??'0').replace(/,/g,''));return Number.isFinite(n)?n:0};
 const setMsg=(s,error=false)=>{$('message').textContent=s;$('message').style.color=error?'#b02020':'#087b4b'};
-// iOS Safari requires a user gesture to activate Web Audio. Never guess a barcode correction.
+// V41: recover stalled Web Audio; never queue alerts on a suspended context.
 let soundContext=null, soundReady=false, consecutiveOutOfLoc=0;
-// Safari: unlock Web Audio from a real screen gesture, without a test-button prerequisite.
-// No scan, storage, location, or export behavior is changed here.
+let audioClock=0, audioWall=0, pendingTones=new Set(), resumeJob=null;
 function soundStatus(message){$('soundState').textContent=message}
+function discardTones(){for(const tone of pendingTones){try{tone.gain.disconnect();tone.osc.stop()}catch(e){}}pendingTones.clear()}
+function retireSound(){const old=soundContext;discardTones();soundContext=null;resumeJob=null;soundReady=false;if(old){old.onstatechange=null;try{old.close().catch(()=>{})}catch(e){}}}
+function stalled(ctx){return ctx.state==='running'&&performance.now()-audioWall>1200&&ctx.currentTime-audioClock<0.02}
 function getSoundContext(){
  const AC=window.AudioContext||window.webkitAudioContext;
  if(!AC){soundStatus('경고음 미지원 브라우저');return null}
- if(!soundContext){
-  soundContext=new AC();
-  soundContext.onstatechange=()=>{
-   soundReady=soundContext.state==='running';
-   soundStatus(soundReady?'경고음 준비 완료 · 자동 알림':'경고음 일시중단 · 화면을 터치해 재활성화');
-  };
- }
+ if(soundContext&&(soundContext.state==='closed'||stalled(soundContext)))retireSound();
+ if(!soundContext){const ctx=new AC();soundContext=ctx;audioClock=ctx.currentTime;audioWall=performance.now();
+ ctx.onstatechange=()=>{if(ctx!==soundContext)return;soundReady=ctx.state==='running';if(!soundReady)discardTones();audioClock=ctx.currentTime;audioWall=performance.now();soundStatus(soundReady?'경고음 준비 완료 · 자동 알림':'경고음 일시중단 · 화면을 터치해 재활성화')};}
  return soundContext;
 }
-function activateSound(){
- try{
-  const ctx=getSoundContext();if(!ctx)return false;
-  if(ctx.state!=='running'){
-   // Calling resume within the user gesture is essential on iOS Safari.
-   const p=ctx.resume();
-   if(p&&typeof p.catch==='function')p.catch(()=>soundStatus('경고음 차단 · 화면을 터치해 주세요'));
-   // Start a silent buffer within the same gesture to unlock iOS audio output.
-   const src=ctx.createBufferSource();src.buffer=ctx.createBuffer(1,1,ctx.sampleRate);
-   src.connect(ctx.destination);src.start(0);
-  }
-  soundReady=ctx.state==='running';
-  if(soundReady)soundStatus('경고음 준비 완료 · 자동 알림');
-  return true;
- }catch(err){soundStatus('경고음 활성화 실패 · 화면을 터치해 주세요');return false}
+function activateSound(force=false){
+ try{if(force)retireSound();const ctx=getSoundContext();if(!ctx)return Promise.resolve(false);
+ if(ctx.state==='running'){soundReady=true;soundStatus('경고음 준비 완료 · 자동 알림');return Promise.resolve(true)}
+ if(resumeJob)return resumeJob;
+ const p=ctx.resume();const src=ctx.createBufferSource();src.buffer=ctx.createBuffer(1,1,ctx.sampleRate);src.connect(ctx.destination);src.onended=()=>src.disconnect();src.start(0);
+ const job=Promise.race([Promise.resolve(p).then(()=>true,()=>false),new Promise(r=>setTimeout(()=>r(false),450))]).then(ok=>{if(ctx!==soundContext)return false;resumeJob=null;soundReady=ok&&ctx.state==='running';if(!soundReady){retireSound();soundStatus('경고음 복구 필요 · 경고음 확인 버튼을 눌러 주세요')}else{audioClock=ctx.currentTime;audioWall=performance.now();soundStatus('경고음 준비 완료 · 자동 알림')}return soundReady});resumeJob=job;return job;
+ }catch(e){soundStatus('경고음 활성화 실패 · 화면을 터치해 주세요');return Promise.resolve(false)}
 }
-// One real screen touch is enough to request audio unlock. Never emit an audible beep here.
-document.addEventListener('touchend',()=>{if(!soundContext||soundContext.state!=='running')activateSound()},{capture:true,passive:true});
-document.addEventListener('click',()=>{if(!soundContext||soundContext.state!=='running')activateSound()},{capture:true});
-document.addEventListener('keydown',()=>{if(!soundContext||soundContext.state!=='running')activateSound()},{capture:true});
-function beepSeries(count=1){
- try{
-  const ctx=getSoundContext();if(!ctx)return;
-  if(ctx.state!=='running')activateSound();
-  // Schedule the sound even while resume() is pending; do not discard this scan's alert.
-  const t0=ctx.currentTime+0.045, duration=0.26, gap=0.36;
-  for(let i=0;i<count;i++){
-   const oscillator=ctx.createOscillator(),gain=ctx.createGain(),t=t0+i*gap;
-   oscillator.type='square';oscillator.frequency.setValueAtTime(880,t);
-   gain.gain.setValueAtTime(0.0001,t);
-   gain.gain.exponentialRampToValueAtTime(0.22,t+0.015);
-   gain.gain.setValueAtTime(0.22,t+duration-0.045);
-   gain.gain.exponentialRampToValueAtTime(0.0001,t+duration);
-   oscillator.connect(gain);gain.connect(ctx.destination);
-   oscillator.start(t);oscillator.stop(t+duration+0.02);
-  }
- }catch(e){soundStatus('경고음 재생 실패 · 화면을 터치해 주세요')}
+function checkAudio(){const ctx=soundContext;if(!ctx)return;if(stalled(ctx)){retireSound();soundStatus('경고음 정지 감지 · 다음 스캔 또는 터치 시 복구');return}if(ctx.currentTime-audioClock>=0.02){audioClock=ctx.currentTime;audioWall=performance.now()}for(const tone of pendingTones){if(performance.now()>tone.expires){try{tone.gain.disconnect();tone.osc.stop()}catch(e){}pendingTones.delete(tone)}}}
+setInterval(checkAudio,500);
+function gestureAudio(e){if(e.target&&e.target.closest&&e.target.closest('#soundTest'))return;checkAudio();if(!soundContext||soundContext.state!=='running')activateSound()}
+document.addEventListener('touchend',gestureAudio,{capture:true,passive:true});
+document.addEventListener('click',gestureAudio,{capture:true});
+document.addEventListener('keydown',gestureAudio,{capture:true});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){retireSound()}else{checkAudio();activateSound()}});
+window.addEventListener('pageshow',()=>{checkAudio();if(soundContext)activateSound()});
+window.addEventListener('pagehide',retireSound);
+async function beepSeries(count=1){
+ const requested=performance.now();try{const ready=await activateSound();const ctx=soundContext;if(!ready||!ctx||ctx.state!=='running'||document.hidden||performance.now()-requested>500)return;
+ const t0=ctx.currentTime+0.045,duration=0.26,gap=0.36;
+ for(let i=0;i<count;i++){const oscillator=ctx.createOscillator(),gain=ctx.createGain(),t=t0+i*gap;
+ oscillator.type='square';oscillator.frequency.setValueAtTime(880,t);
+ gain.gain.setValueAtTime(0.0001,t);gain.gain.exponentialRampToValueAtTime(0.22,t+0.015);gain.gain.setValueAtTime(0.22,t+duration-0.045);gain.gain.exponentialRampToValueAtTime(0.0001,t+duration);
+ oscillator.connect(gain);gain.connect(ctx.destination);const tone={osc:oscillator,gain,expires:performance.now()+500+i*360};pendingTones.add(tone);oscillator.onended=()=>{pendingTones.delete(tone);try{gain.disconnect();oscillator.disconnect()}catch(e){}};oscillator.start(t);oscillator.stop(t+duration+0.02);
+ }
+ }catch(e){soundStatus('경고음 재생 실패 · 경고음 확인 버튼을 눌러 주세요')}
 }
-$('soundTest').onclick=()=>{activateSound();beepSeries(1);setMsg('경고음 테스트 1회 실행 · 소리가 안 나면 화면을 다시 터치하고 볼륨을 확인하세요.')};
+$('soundTest').onclick=()=>{activateSound(true);beepSeries(1);setMsg('경고음 복구 및 테스트 · 소리가 안 나면 볼륨을 확인하고 다시 눌러 주세요.')};
 
 function persist(){try{localStorage.setItem(KEY,JSON.stringify({scans,loc,version:6,zeroConfirmed:[...zeroConfirmed]}))}catch(e){setMsg('저장 공간이 부족합니다. 즉시 CSV 백업하세요.',true)}}
 function restore(){try{let v=JSON.parse(localStorage.getItem(KEY)||'{}');scans=Array.isArray(v.scans)?v.scans.filter(x=>x&&x.loc&&x.barcode).map(normalizeScan):[];zeroConfirmed=readZero(v);loc='';setMsg('저장된 스캔 기록 '+scans.length+'건을 복원했습니다.')}catch(e){scans=[];zeroConfirmed.clear();setMsg('기록 복원에 실패했습니다.',true)}render()}
