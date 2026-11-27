@@ -122,7 +122,9 @@ window.addEventListener('pagehide',retireSound);
 let voiceEpoch=0,voiceTimer=null;
 function cancelVoice(){voiceEpoch++;clearTimeout(voiceTimer);try{window.speechSynthesis?.cancel()}catch(e){}}
 function announce(message,delay=0){cancelVoice();const token=voiceEpoch;const position=loc;const run=()=>{try{if(token!==voiceEpoch||position!==loc||document.hidden||!window.speechSynthesis)return;const u=new SpeechSynthesisUtterance(message);u.lang='ko-KR';u.rate=1.1;u.volume=1;window.speechSynthesis.speak(u)}catch(e){}};if(delay)voiceTimer=setTimeout(run,delay);else run()}
-function audioResult(l){const rs=byLoc.get(l)||[];if(!rs.some(r=>r.qty>0))return null;const expected=new Map(rs.map(r=>[r.barcode,r.qty]));const counts=new Map();for(const x of scans)if(x.loc===l)counts.set(x.barcode,(counts.get(x.barcode)||0)+1);if(rs.some(r=>(counts.get(r.barcode)||0)<r.qty))return null;let extra=false,over=false;for(const [b,n] of counts){if(!expected.has(b))extra=true;else if(n>expected.get(b))over=true}return '실사 완료'+(extra&&over?', 미등록 상품 및 수량 초과':extra?', 미등록 상품 초과':over?', 수량 초과':'')}
+function audioResult(l){const rs=byLoc.get(l)||[];if(!rs.some(r=>r.qty>0))return null;const expected=new Map(rs.map(r=>[r.barcode,r.qty]));const counts=new Map();for(const x of scans)if(x.loc===l)counts.set(x.barcode,(counts.get(x.barcode)||0)+1);if(rs.some(r=>(counts.get(r.barcode)||0)<r.qty))return null;let extra=false,over=false;for(const [b,n] of counts){if(!expected.has(b))extra=true;else if(n>expected.get(b))over=true}return '실사 완료'+(extra||over?', 과재고':'')}
+function safeAudioResult(l){try{return audioResult(l)}catch(e){return null}}
+function mutationVoice(before,position,allowCorrection=false,delay=0){try{if(position!==loc)return;const after=audioResult(position);if(after&&(!before||(allowCorrection&&before!==after&&after==='실사 완료')))announce(after,delay)}catch(e){}}
 document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelVoice()});
 async function beepSeries(count=1){
  cancelVoice();
@@ -230,17 +232,17 @@ $('history').addEventListener('click',e=>{
  if(confirmBtn){
   const i=Number(confirmBtn.getAttribute('data-confirm-delete'));
   if(!Number.isInteger(i)||i!==pendingDelete||i<0||i>=scans.length)return;
-  const s=scans[i],bid=s.batchId;
+  const s=scans[i],bid=s.batchId;const before=s.loc===loc?safeAudioResult(loc):null;if(s.loc===loc)cancelVoice();
   const removed=bid?scans.filter(x=>x.batchId===bid).length:1;
   if(bid)scans=scans.filter(x=>x.batchId!==bid);else scans.splice(i,1);
-  pendingDelete=-1;lastScan=null;persist();render();setMsg('삭제 완료: '+s.loc+' / '+s.barcode+' · '+removed+'건 삭제, CSV 반영');return;
+  pendingDelete=-1;lastScan=null;persist();render();setMsg('삭제 완료: '+s.loc+' / '+s.barcode+' · '+removed+'건 삭제, CSV 반영');mutationVoice(before,s.loc,true);return;
  }
  const btn=e.target.closest('[data-delete-index]');if(!btn)return;
  const i=Number(btn.getAttribute('data-delete-index'));
  if(!Number.isInteger(i)||i<0||i>=scans.length)return;
  pendingDelete=i;renderHistory();
 });
-$('targetList').addEventListener('click',e=>{const btn=e.target.closest('[data-fill-barcode]');if(!btn)return;const b=barcodeKey(btn.dataset.fillBarcode);const r=(byLoc.get(loc)||[]).find(x=>x.barcode===b);if(!r)return;const already=countMap().get(loc+'\u0001'+b)||0;const qty=Math.max(0,r.qty-already);if(!qty||qty>100000){setMsg('추가할 수량이 없거나 100,000개를 초과합니다.',true);return}const at=new Date().toISOString(),bid='bulk_'+at+'_'+(++batchSeq);for(let j=0;j<qty;j++)scans.push({loc,barcode:b,at,batchId:bid});lastScan=scans[scans.length-1];pendingDelete=-1;persist();render();setMsg('전산수량 반영: '+loc+' / '+b+' × '+qty+'개');$('scan').focus({preventScroll:true})});
+$('targetList').addEventListener('click',e=>{const btn=e.target.closest('[data-fill-barcode]');if(!btn)return;const b=barcodeKey(btn.dataset.fillBarcode);const r=(byLoc.get(loc)||[]).find(x=>x.barcode===b);if(!r)return;const already=countMap().get(loc+'\u0001'+b)||0;const qty=Math.max(0,r.qty-already);if(!qty||qty>100000){setMsg('추가할 수량이 없거나 100,000개를 초과합니다.',true);return}const before=safeAudioResult(loc);cancelVoice();const at=new Date().toISOString(),bid='bulk_'+at+'_'+(++batchSeq);for(let j=0;j<qty;j++)scans.push({loc,barcode:b,at,batchId:bid});lastScan=scans[scans.length-1];pendingDelete=-1;persist();render();setMsg('전산수량 반영: '+loc+' / '+b+' × '+qty+'개');mutationVoice(before,loc);$('scan').focus({preventScroll:true})});
 $('showHistory').onclick=()=>{historyAll=false;pendingDelete=-1;renderHistory()};$('showHistoryAll').onclick=()=>{historyAll=true;pendingDelete=-1;renderHistory()};
 function updateBulkUI(){let q=armedQty;$('bulkState').textContent=q>1?'다음 스캔 '+q+'개 적용':'일반 스캔 · 1개';$('bulkState').className='pill '+(q>1?'warn':'ok');$('bulkQty').value=String(q)}
 $('bulkApply').onclick=()=>{let q=Number($('bulkQty').value);if(!Number.isInteger(q)||q<1||q>5000){setMsg('수량은 1~5000 사이 정수로 입력해 주세요.',true);return}armedQty=q;updateBulkUI();setMsg(q===1?'일반 스캔 모드입니다.':'대량 수량 '+q+'개 설정 완료. 다음 상품 바코드를 한 번 스캔하세요.');$('scan').focus()};
@@ -317,7 +319,7 @@ function setKeyboardMode(enabled){
 }
 $('keyboardToggle').onclick=()=>{setKeyboardMode(!manualKeyboard);if(manualKeyboard)$('scan').focus()};
 $('manualSubmit').onclick=()=>{if(!$('scan').value.trim()){setMsg('바코드를 입력해 주세요.',true);return}commit($('scan').value);$('scan').blur()};
-$('scan').addEventListener('input',()=>{if(!manualKeyboard&&!$('scan').value.match(/^[\x00-\x7F]*$/)&&!$('scan').value.match(/[\u1100-\u11FF]/)){$('scan').value=keyboardScanKey($('scan').value)}clearTimeout(timer);if(!manualKeyboard)timer=setTimeout(()=>commit($('scan').value),700)});$('undo').onclick=()=>{if(!scans.length){setMsg('취소할 기록이 없습니다.',true);return}let s=scans[scans.length-1],bid=s.batchId,removed=1;if(bid){removed=scans.filter(x=>x.batchId===bid).length;scans=scans.filter(x=>x.batchId!==bid)}else scans.pop();pendingDelete=-1;persist();render();setMsg('마지막 스캔 취소: '+s.loc+' / '+s.barcode+' ('+removed+'건)');$('scan').focus()};
+$('scan').addEventListener('input',()=>{if(!manualKeyboard&&!$('scan').value.match(/^[\x00-\x7F]*$/)&&!$('scan').value.match(/[\u1100-\u11FF]/)){$('scan').value=keyboardScanKey($('scan').value)}clearTimeout(timer);if(!manualKeyboard)timer=setTimeout(()=>commit($('scan').value),700)});$('undo').onclick=()=>{if(!scans.length){setMsg('취소할 기록이 없습니다.',true);return}let s=scans[scans.length-1],bid=s.batchId,removed=1;const before=s.loc===loc?safeAudioResult(loc):null;if(s.loc===loc)cancelVoice();if(bid){removed=scans.filter(x=>x.batchId===bid).length;scans=scans.filter(x=>x.batchId!==bid)}else scans.pop();pendingDelete=-1;persist();render();setMsg('마지막 스캔 취소: '+s.loc+' / '+s.barcode+' ('+removed+'건)');mutationVoice(before,s.loc,true);$('scan').focus()};
 $('saveCompare').onclick=()=>{let counts=countMap(),rows=[['로케이션','바코드','품명','품번','색상','사이즈','전산수량','실사수량','차이','상태']];let known=new Set();for(let r of records){let k=r.loc+'\u0001'+r.barcode;known.add(k);let n=counts.get(k)||0;rows.push([r.loc,r.barcode,r.name,r.style,r.color,r.size,r.qty,n,n-r.qty,n===r.qty?(r.qty===0&&!scans.some(s=>s.loc===r.loc)&&!zeroConfirmed.has(r.loc)?'미실사':'완료'):n>r.qty?'초과':'부족'])}for(let [k,n] of counts)if(!known.has(k)){let [l,b]=k.split('\u0001');const info=getScanInfo({loc:l,barcode:b});rows.push([l,b,info.name,info.style,info.color,info.size,0,n,n,byLoc.has(l)?'미등록 상품':'미등록 로케이션'])}makeCSV(rows,timestamp()+'_실사비교.csv')};
 function rawLog(){let out=[],prev='';for(let s of scans){if(s.loc!==prev){out.push([s.at,s.loc]);prev=s.loc}out.push([s.at,s.barcode])}return out}
 function csvLocationOrder(){return [...new Set([...locs,...scans.map(s=>s.loc)])].filter(Boolean)}
